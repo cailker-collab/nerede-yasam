@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Nerede Yesem">
@@ -11,10 +12,10 @@
 <style>
 * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
 :root {
-  --bg: #0f1117; --surface: #1a1d27; --surface2: #22263a;
-  --border: rgba(255,255,255,.08); --text: #f0f2ff; --text2: #8b90b0; --text3: #4a4f6a;
-  --accent: #ff6b35; --accent2: #ffd166; --green: #06d6a0; --blue: #4cc9f0;
-  --safe-top: env(safe-area-inset-top,0px); --safe-bottom: env(safe-area-inset-bottom,0px);
+  --bg:#0f1117; --surface:#1a1d27; --surface2:#22263a;
+  --border:rgba(255,255,255,.08); --text:#f0f2ff; --text2:#8b90b0; --text3:#4a4f6a;
+  --accent:#ff6b35; --accent2:#ffd166; --green:#06d6a0; --blue:#4cc9f0;
+  --safe-top:env(safe-area-inset-top,0px); --safe-bottom:env(safe-area-inset-bottom,0px);
 }
 html,body { height:100%; font-family:'Plus Jakarta Sans',sans-serif; background:var(--bg); color:var(--text); overflow:hidden; }
 #app { max-width:430px; height:100dvh; margin:0 auto; display:flex; flex-direction:column; position:relative; overflow:hidden; }
@@ -165,8 +166,8 @@ html,body { height:100%; font-family:'Plus Jakarta Sans',sans-serif; background:
 
 <script>
 const API_KEY = 'AIzaSyC8bb0ULcpoemQElpcSDgGhz-9s1RZFyqs';
-let map, service, userLat, userLon, userMarker, directionsRenderer;
-let places=[], markers=[];
+let map, userLat, userLon, userMarkerEl, directionsRenderer;
+let places=[], mapMarkers=[];
 let activeType='all', sortBy='distance', radius=500;
 let favorites=JSON.parse(localStorage.getItem('nerede_favs')||'[]');
 let selectedId=null, sheetExpanded=false;
@@ -183,7 +184,8 @@ function tc(types) {
   return {label:'Yeme İçme', emoji:'🍽', color:'#8b90b0', bg:'rgba(139,144,176,.15)'};
 }
 
-function initMap() {
+async function initMap() {
+  const {Map} = await google.maps.importLibrary('maps');
   const dark = [
     {elementType:'geometry',stylers:[{color:'#1a1d27'}]},
     {elementType:'labels.text.fill',stylers:[{color:'#8b90b0'}]},
@@ -195,13 +197,12 @@ function initMap() {
     {featureType:'poi.park',elementType:'geometry',stylers:[{color:'#1e2a1e'}]},
     {featureType:'transit',elementType:'geometry',stylers:[{color:'#22263a'}]},
   ];
-  map = new google.maps.Map(document.getElementById('map'), {
+  map = new Map(document.getElementById('map'), {
     zoom:16, center:{lat:41.015,lng:28.98}, styles:dark,
     disableDefaultUI:true, zoomControl:true,
     zoomControlOptions:{position:google.maps.ControlPosition.RIGHT_CENTER},
     gestureHandling:'greedy', clickableIcons:false,
   });
-  service = new google.maps.places.PlacesService(map);
   map.addListener('click', ()=>{closeDetail();deselectAll();});
   getLocation();
 }
@@ -226,184 +227,219 @@ function useFallback() {
   map.setCenter({lat:userLat,lng:userLon});
   placeUserMarker(); fetchPlaces();
 }
+
 function placeUserMarker() {
-  if (userMarker) userMarker.setMap(null);
-  userMarker = new google.maps.Marker({
+  if (userMarkerEl) userMarkerEl.setMap(null);
+  userMarkerEl = new google.maps.Marker({
     position:{lat:userLat,lng:userLon}, map,
     icon:{path:google.maps.SymbolPath.CIRCLE,scale:9,fillColor:'#4cc9f0',fillOpacity:1,strokeColor:'#fff',strokeWeight:2.5},
     title:'Konumunuz', zIndex:999
   });
 }
+
 async function reverseGeocode() {
   try {
     const r = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${userLat}&lon=${userLon}&format=json&accept-language=tr`);
     const d = await r.json();
     const name = d.address?.suburb||d.address?.neighbourhood||d.address?.city_district||d.address?.city||'Konumunuz';
     document.getElementById('locText').textContent=name;
-  } catch(e) { document.getElementById('locText').textContent='Konumunuz'; }
+  } catch(e) {}
 }
 
-function fetchPlaces() {
+// ── YENİ Places API (nearbySearch v2) ──
+async function fetchPlaces() {
   showLoading();
-  markers.forEach(m=>m.setMap(null)); markers=[]; places=[];
+  mapMarkers.forEach(m=>m.setMap(null)); mapMarkers=[]; places=[];
+
   const typeMap = {
-    all:['cafe','restaurant','bakery','fast_food'],
+    all: ['cafe','restaurant','bakery','fast_food'],
     cafe:['cafe'], restaurant:['restaurant'], bakery:['bakery'], fast_food:['fast_food']
   };
   const types = typeMap[activeType];
-  let done=0;
-  types.forEach(type => {
-    service.nearbySearch({
-      location:{lat:userLat,lng:userLon}, radius, type
-    }, (results,status) => {
-      if (status===google.maps.places.PlacesServiceStatus.OK && results) {
-        results.forEach(p => {
-          if (p.business_status !== 'CLOSED_PERMANENTLY' && !places.find(x=>x.place_id===p.place_id))
-            places.push(proc(p));
-        });
-      }
-      if (++done===types.length) { hideLoading(); renderAll(); if(places.length>0) expandSheet(); document.getElementById('placeCount').textContent=places.length; }
-    });
-  });
-}
-function proc(p) {
-  const dist=calcDist(userLat,userLon,p.geometry.location.lat(),p.geometry.location.lng());
-  return {
-    place_id:p.place_id, name:p.name,
-    lat:p.geometry.location.lat(), lng:p.geometry.location.lng(),
-    types:p.types||[], rating:p.rating||null, user_ratings_total:p.user_ratings_total||0,
-    price_level:p.price_level, vicinity:p.vicinity||'',
-    opening_hours:p.opening_hours||null, business_status:p.business_status, distance:dist
-  };
+
+  try {
+    const {Place, SearchNearbyRankPreference} = await google.maps.importLibrary('places');
+    let allResults = [];
+    
+    for (const type of types) {
+      try {
+        const request = {
+          fields: ['id','displayName','location','types','rating','userRatingCount','priceLevel','formattedAddress','regularOpeningHours','businessStatus','nationalPhoneNumber','websiteURI'],
+          locationRestriction: {
+            circle: {
+              center: {lat:userLat,lng:userLon},
+              radius: radius
+            }
+          },
+          includedPrimaryTypes: [type],
+          maxResultCount: 20,
+          rankPreference: SearchNearbyRankPreference.DISTANCE,
+          language: 'tr',
+          region: 'tr',
+        };
+        const {places: results} = await Place.searchNearby(request);
+        if (results) {
+          results.forEach(p => {
+            if (!allResults.find(x=>x.id===p.id)) allResults.push(p);
+          });
+        }
+      } catch(e) { console.warn('Type fetch error:', type, e); }
+    }
+
+    places = allResults
+      .filter(p => p.businessStatus !== 'CLOSED_PERMANENTLY')
+      .map(p => ({
+        id: p.id,
+        name: p.displayName,
+        lat: p.location.lat(),
+        lng: p.location.lng(),
+        types: p.types||[],
+        rating: p.rating||null,
+        userRatingCount: p.userRatingCount||0,
+        priceLevel: p.priceLevel||null,
+        address: p.formattedAddress||'',
+        openingHours: p.regularOpeningHours||null,
+        businessStatus: p.businessStatus||'OPERATIONAL',
+        phone: p.nationalPhoneNumber||null,
+        website: p.websiteURI||null,
+        distance: calcDist(userLat,userLon,p.location.lat(),p.location.lng()),
+      }));
+
+    hideLoading();
+    renderAll();
+    if (places.length>0) expandSheet();
+    document.getElementById('placeCount').textContent=places.length;
+
+  } catch(e) {
+    console.error('Places API error:', e);
+    hideLoading();
+    document.getElementById('placeList').innerHTML=`<div class="empty-state"><div class="emoji">⚠️</div><p>Mekanlar yüklenemedi.<br>${e.message||'Bir hata oluştu.'}</p></div>`;
+    expandSheet();
+  }
 }
 
 function calcDist(a,b,c,d) {
-  const R=6371000, dLat=(c-a)*Math.PI/180, dLon=(d-b)*Math.PI/180;
-  return Math.round(R*2*Math.atan2(Math.sqrt(Math.sin(dLat/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(dLon/2)**2),Math.sqrt(1-(Math.sin(dLat/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(dLon/2)**2))));
+  const R=6371000,dLat=(c-a)*Math.PI/180,dLon=(d-b)*Math.PI/180;
+  const x=Math.sin(dLat/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(dLon/2)**2;
+  return Math.round(R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x)));
 }
-function fmtDist(m) { return m<1000?m+'m':(m/1000).toFixed(1)+'km'; }
-function starStr(r) { const f=Math.floor(r),h=(r%1)>=.5?1:0; return '★'.repeat(f)+(h?'½':'')+'☆'.repeat(5-f-h); }
-function price(p) { return ['','₺','₺₺','₺₺₺','₺₺₺₺'][p]||''; }
+function fmtDist(m){return m<1000?m+'m':(m/1000).toFixed(1)+'km';}
+function starStr(r){const f=Math.floor(r),h=(r%1)>=.5?1:0;return '★'.repeat(f)+(h?'½':'')+'☆'.repeat(5-f-h);}
+function price(p){return {PRICE_LEVEL_FREE:'Ücretsiz',PRICE_LEVEL_INEXPENSIVE:'₺',PRICE_LEVEL_MODERATE:'₺₺',PRICE_LEVEL_EXPENSIVE:'₺₺₺',PRICE_LEVEL_VERY_EXPENSIVE:'₺₺₺₺'}[p]||'';}
 
 function getSorted() {
   return [...places].sort((a,b)=>{
     if(sortBy==='distance') return a.distance-b.distance;
     if(sortBy==='rating') return (b.rating||0)-(a.rating||0);
     if(sortBy==='name') return a.name.localeCompare(b.name,'tr');
-    if(sortBy==='reviews') return b.user_ratings_total-a.user_ratings_total;
+    if(sortBy==='reviews') return b.userRatingCount-a.userRatingCount;
     return 0;
   });
 }
 
-function renderAll() { renderMarkers(); renderList(); }
+function renderAll(){renderMarkers();renderList();}
 
 function renderMarkers() {
-  markers.forEach(m=>m.setMap(null)); markers=[];
-  getSorted().forEach(p => {
-    const t=tc(p.types), sel=p.place_id===selectedId;
+  mapMarkers.forEach(m=>m.setMap(null)); mapMarkers=[];
+  getSorted().forEach(p=>{
+    const t=tc(p.types), sel=p.id===selectedId;
     const svg=`<svg width="38" height="44" viewBox="0 0 38 44" xmlns="http://www.w3.org/2000/svg"><path d="M19 0C8.5 0 0 8.5 0 19c0 14.25 19 25 19 25s19-10.75 19-25C38 8.5 29.5 0 19 0z" fill="${sel?'#fff':t.color}" stroke="${sel?t.color:'rgba(0,0,0,.3)'}" stroke-width="${sel?3:1}"/><text x="19" y="25" text-anchor="middle" font-size="18">${t.emoji}</text></svg>`;
     const m=new google.maps.Marker({
-      position:{lat:p.lat,lng:p.lng}, map, title:p.name, zIndex:sel?100:1,
+      position:{lat:p.lat,lng:p.lng},map,title:p.name,zIndex:sel?100:1,
       icon:{url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`,scaledSize:new google.maps.Size(38,44),anchor:new google.maps.Point(19,44)}
     });
-    m.addListener('click',()=>openDetail(p.place_id));
-    markers.push(m);
+    m.addListener('click',()=>openDetail(p.id));
+    mapMarkers.push(m);
   });
 }
 
 function renderList() {
   const sorted=getSorted();
   const list=document.getElementById('placeList');
-  if (sorted.length===0) { list.innerHTML=`<div class="empty-state"><div class="emoji">🔍</div><p>Bu alanda açık mekan bulunamadı.<br>Mesafeyi artırmayı deneyin.</p></div>`; return; }
+  if(sorted.length===0){list.innerHTML=`<div class="empty-state"><div class="emoji">🔍</div><p>Bu alanda açık mekan bulunamadı.<br>Mesafeyi artırmayı deneyin.</p></div>`;return;}
   list.innerHTML=sorted.map((p,i)=>{
-    const t=tc(p.types), fav=favorites.includes(p.place_id);
-    const isOpen=p.opening_hours?.isOpen?.()??null;
-    return `<div class="place-card ${p.place_id===selectedId?'selected':''}" onclick="openDetail('${p.place_id}')" style="animation-delay:${i*0.03}s">
+    const t=tc(p.types),fav=favorites.includes(p.id);
+    const isOpen=p.openingHours?.isOpen?.()??null;
+    return `<div class="place-card ${p.id===selectedId?'selected':''}" onclick="openDetail('${p.id}')" style="animation-delay:${i*0.03}s">
       <div class="place-icon" style="background:${t.bg}">${t.emoji}</div>
       <div class="place-info">
         <div class="place-name">${p.name}</div>
-        <div class="place-type">${t.label}${price(p.price_level)?' · '+price(p.price_level):''}</div>
+        <div class="place-type">${t.label}${price(p.priceLevel)?' · '+price(p.priceLevel):''}</div>
         <div class="place-meta">
           <span class="mp mp-dist">📍 ${fmtDist(p.distance)}</span>
-          ${p.rating?`<span class="mp mp-stars">⭐ ${p.rating} (${p.user_ratings_total})</span>`:''}
-          ${p.business_status==='CLOSED_TEMPORARILY'?`<span class="mp mp-closed">⚠️ Geçici Kapalı</span>`:
+          ${p.rating?`<span class="mp mp-stars">⭐ ${p.rating} (${p.userRatingCount})</span>`:''}
+          ${p.businessStatus==='CLOSED_TEMPORARILY'?`<span class="mp mp-closed">⚠️ Geçici Kapalı</span>`:
             isOpen===true?`<span class="mp mp-open">✅ Açık</span>`:
             isOpen===false?`<span class="mp mp-closed">🔴 Kapalı</span>`:''}
         </div>
       </div>
       <div class="place-actions">
         <button class="route-btn" onclick="event.stopPropagation();goRoute(${p.lat},${p.lng},'${p.name.replace(/'/g,"\\'")}')">🧭 Yol Tarifi</button>
-        <button class="fav-btn" onclick="event.stopPropagation();toggleFav('${p.place_id}')">${fav?'❤️':'🤍'}</button>
+        <button class="fav-btn" onclick="event.stopPropagation();toggleFav('${p.id}')">${fav?'❤️':'🤍'}</button>
       </div>
     </div>`;
   }).join('');
 }
 
 function openDetail(pid) {
-  const p=places.find(x=>x.place_id===pid); if(!p) return;
+  const p=places.find(x=>x.id===pid); if(!p) return;
   selectedId=pid; renderAll(); map.panTo({lat:p.lat,lng:p.lng});
-  const t=tc(p.types), fav=favorites.includes(pid), isOpen=p.opening_hours?.isOpen?.()??null;
-  document.getElementById('detailContent').innerHTML=`<div style="text-align:center;padding:20px 0;color:var(--text2);font-size:13px">Detaylar yükleniyor...</div>`;
+  const t=tc(p.types),fav=favorites.includes(pid),isOpen=p.openingHours?.isOpen?.()??null;
+  const mapsUrl=`https://www.google.com/maps/search/?api=1&query=${p.lat},${p.lng}&query_place_id=${pid}`;
+  const weekdays=p.openingHours?.weekdayDescriptions||[];
+  document.getElementById('detailContent').innerHTML=`
+    <div class="d-header">
+      <div class="d-icon" style="background:${t.bg}">${t.emoji}</div>
+      <div style="flex:1;min-width:0">
+        <div class="d-title">${p.name}</div>
+        <div class="d-sub">${p.address}</div>
+        ${p.rating?`<div class="stars">${starStr(p.rating)} <span style="font-size:11px;color:var(--text2);font-weight:700">${p.rating} · ${p.userRatingCount} yorum</span></div>`:''}
+      </div>
+    </div>
+    <div class="d-grid">
+      <div class="d-stat"><div class="d-stat-lbl">📍 Mesafe</div><div class="d-stat-val">${fmtDist(p.distance)}</div></div>
+      <div class="d-stat"><div class="d-stat-lbl">💰 Fiyat</div><div class="d-stat-val">${price(p.priceLevel)||'—'}</div></div>
+      <div class="d-stat" style="grid-column:1/-1">
+        <div class="d-stat-lbl">🕐 Durum</div>
+        <div class="d-stat-val" style="font-size:13px;color:${p.businessStatus==='CLOSED_TEMPORARILY'?'var(--accent2)':isOpen===true?'var(--green)':isOpen===false?'var(--accent)':'var(--text2)'}">
+          ${p.businessStatus==='CLOSED_TEMPORARILY'?'⚠️ Geçici Olarak Kapalı':isOpen===true?'✅ Şu an açık':isOpen===false?'🔴 Şu an kapalı':'ℹ️ Saat bilgisi yok'}
+        </div>
+      </div>
+      ${p.phone?`<div class="d-stat" style="grid-column:1/-1"><div class="d-stat-lbl">📞 Telefon</div><div class="d-stat-val" style="font-size:13px"><a href="tel:${p.phone}" style="color:var(--blue);text-decoration:none">${p.phone}</a></div></div>`:''}
+      ${weekdays.length?`<div class="d-stat" style="grid-column:1/-1"><div class="d-stat-lbl">🗓 Çalışma Saatleri</div><div style="font-size:11px;color:var(--text2);font-weight:600;line-height:1.8;margin-top:4px">${weekdays.join('<br>')}</div></div>`:''}
+    </div>
+    <button class="big-btn primary" onclick="goRoute(${p.lat},${p.lng},'${p.name.replace(/'/g,"\\'")}')">🧭 Yol Tarifi Al</button>
+    <button class="big-btn secondary" onclick="window.open('${mapsUrl}','_blank')">🗺 Google Maps'te Aç</button>
+    ${p.website?`<button class="big-btn secondary" onclick="window.open('${p.website}','_blank')">🌐 Web Sitesi</button>`:''}
+    <div style="display:flex;justify-content:center;margin-top:10px">
+      <button id="favBtn_${pid}" onclick="toggleFav('${pid}')" style="background:transparent;border:none;font-size:13px;font-weight:700;color:var(--text2);cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;display:flex;align-items:center;gap:5px">
+        ${fav?'❤️ Favorilerden Çıkar':'🤍 Favorilere Ekle'}
+      </button>
+    </div>
+  `;
   document.getElementById('detailOverlay').classList.add('open');
-  service.getDetails({placeId:pid,fields:['name','formatted_phone_number','website','opening_hours','url','formatted_address']},(det,st)=>{
-    const phone=det?.formatted_phone_number||null, website=det?.website||null;
-    const mapsUrl=det?.url||`https://www.google.com/maps/search/?api=1&query=${p.lat},${p.lng}`;
-    const addr=det?.formatted_address||p.vicinity;
-    const oh=det?.opening_hours||p.opening_hours;
-    const nowOpen=oh?.isOpen?.()??null;
-    document.getElementById('detailContent').innerHTML=`
-      <div class="d-header">
-        <div class="d-icon" style="background:${t.bg}">${t.emoji}</div>
-        <div style="flex:1;min-width:0">
-          <div class="d-title">${p.name}</div>
-          <div class="d-sub" style="margin-bottom:2px">${addr}</div>
-          ${p.rating?`<div class="stars">${starStr(p.rating)} <span style="font-size:11px;color:var(--text2);font-weight:700">${p.rating} · ${p.user_ratings_total} yorum</span></div>`:''}
-        </div>
-      </div>
-      <div class="d-grid">
-        <div class="d-stat"><div class="d-stat-lbl">📍 Mesafe</div><div class="d-stat-val">${fmtDist(p.distance)}</div></div>
-        <div class="d-stat"><div class="d-stat-lbl">💰 Fiyat</div><div class="d-stat-val">${price(p.price_level)||'—'}</div></div>
-        <div class="d-stat" style="grid-column:1/-1">
-          <div class="d-stat-lbl">🕐 Durum</div>
-          <div class="d-stat-val" style="font-size:14px;color:${p.business_status==='CLOSED_TEMPORARILY'?'var(--accent2)':nowOpen===true?'var(--green)':nowOpen===false?'var(--accent)':'var(--text2)'}">
-            ${p.business_status==='CLOSED_TEMPORARILY'?'⚠️ Geçici Olarak Kapalı':nowOpen===true?'✅ Şu an açık':nowOpen===false?'🔴 Şu an kapalı':'ℹ️ Saat bilgisi yok'}
-          </div>
-        </div>
-        ${phone?`<div class="d-stat" style="grid-column:1/-1"><div class="d-stat-lbl">📞 Telefon</div><div class="d-stat-val" style="font-size:14px"><a href="tel:${phone}" style="color:var(--blue);text-decoration:none">${phone}</a></div></div>`:''}
-        ${oh?.weekday_text?.length?`<div class="d-stat" style="grid-column:1/-1"><div class="d-stat-lbl">🗓 Haftalık Saatler</div><div style="font-size:11px;color:var(--text2);font-weight:600;line-height:1.7;margin-top:4px">${oh.weekday_text.join('<br>')}</div></div>`:''}
-      </div>
-      <button class="big-btn primary" onclick="goRoute(${p.lat},${p.lng},'${p.name.replace(/'/g,"\\'")}')">🧭 Yol Tarifi Al</button>
-      <button class="big-btn secondary" onclick="window.open('${mapsUrl}','_blank')">🗺 Google Maps'te Aç</button>
-      ${website?`<button class="big-btn secondary" onclick="window.open('${website}','_blank')">🌐 Web Sitesi</button>`:''}
-      <div style="display:flex;justify-content:center;margin-top:10px">
-        <button id="favBtn_${pid}" onclick="toggleFav('${pid}')" style="background:transparent;border:none;font-size:13px;font-weight:700;color:var(--text2);cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;display:flex;align-items:center;gap:5px">
-          ${fav?'❤️ Favorilerden Çıkar':'🤍 Favorilere Ekle'}
-        </button>
-      </div>
-    `;
-  });
 }
 
-function closeDetail() { document.getElementById('detailOverlay').classList.remove('open'); }
-function closeDetailOnBg(e) { if(e.target===document.getElementById('detailOverlay')) closeDetail(); }
-function deselectAll() { selectedId=null; renderAll(); }
+function closeDetail(){document.getElementById('detailOverlay').classList.remove('open');}
+function closeDetailOnBg(e){if(e.target===document.getElementById('detailOverlay'))closeDetail();}
+function deselectAll(){selectedId=null;renderAll();}
 
 function goRoute(lat,lng,name) {
   closeDetail();
-  if (directionsRenderer) directionsRenderer.setMap(null);
+  if(directionsRenderer) directionsRenderer.setMap(null);
   directionsRenderer=new google.maps.DirectionsRenderer({
     map, suppressMarkers:false,
     polylineOptions:{strokeColor:'#ff6b35',strokeWeight:5,strokeOpacity:.85}
   });
   new google.maps.DirectionsService().route({
-    origin:{lat:userLat,lng:userLon}, destination:{lat,lng},
+    origin:{lat:userLat,lng:userLon},destination:{lat,lng},
     travelMode:google.maps.TravelMode.WALKING
   },(result,status)=>{
-    if (status==='OK') {
+    if(status==='OK'){
       directionsRenderer.setDirections(result);
       const leg=result.routes[0].legs[0];
       const old=document.getElementById('routeInfo');
-      if(old) old.remove();
+      if(old)old.remove();
       document.getElementById('placeList').insertAdjacentHTML('afterbegin',
         `<div class="route-info" id="routeInfo">
           <div style="font-size:22px">🚶</div>
@@ -417,40 +453,40 @@ function goRoute(lat,lng,name) {
     }
   });
 }
-function clearRoute() { if(directionsRenderer){directionsRenderer.setMap(null);directionsRenderer=null;} renderList(); }
+function clearRoute(){if(directionsRenderer){directionsRenderer.setMap(null);directionsRenderer=null;}renderList();}
 
-function toggleType(type) {
+function toggleType(type){
   activeType=type;
   document.querySelectorAll('#typeFilters .chip').forEach(c=>c.classList.toggle('active',c.dataset.type===type));
   if(directionsRenderer){directionsRenderer.setMap(null);directionsRenderer=null;}
   fetchPlaces();
 }
-function setSort(s) {
-  sortBy=s;
-  document.querySelectorAll('.sort-chip').forEach(c=>c.classList.toggle('active',c.dataset.sort===s));
-  renderAll();
-}
-function toggleFav(pid) {
+function setSort(s){sortBy=s;document.querySelectorAll('.sort-chip').forEach(c=>c.classList.toggle('active',c.dataset.sort===s));renderAll();}
+function toggleFav(pid){
   favorites=favorites.includes(pid)?favorites.filter(f=>f!==pid):[...favorites,pid];
   localStorage.setItem('nerede_favs',JSON.stringify(favorites));
   renderList();
   const btn=document.getElementById('favBtn_'+pid);
-  if(btn) btn.innerHTML=favorites.includes(pid)?'❤️ Favorilerden Çıkar':'🤍 Favorilere Ekle';
+  if(btn)btn.innerHTML=favorites.includes(pid)?'❤️ Favorilerden Çıkar':'🤍 Favorilere Ekle';
 }
-function openRadiusModal() { document.getElementById('radiusOverlay').classList.add('open'); }
-function closeRadiusBg(e) { if(e.target===document.getElementById('radiusOverlay')) document.getElementById('radiusOverlay').classList.remove('open'); }
-function setRadius(r) {
+function openRadiusModal(){document.getElementById('radiusOverlay').classList.add('open');}
+function closeRadiusBg(e){if(e.target===document.getElementById('radiusOverlay'))document.getElementById('radiusOverlay').classList.remove('open');}
+function setRadius(r){
   radius=r;
   document.querySelectorAll('.radius-opt').forEach(o=>o.classList.toggle('active',parseInt(o.dataset.r)===r));
   document.getElementById('radiusBtn').textContent=`📍 ${r>=1000?r/1000+'km':r+'m'}`;
   document.getElementById('radiusOverlay').classList.remove('open');
   fetchPlaces();
 }
-function toggleSheet() { sheetExpanded=!sheetExpanded; document.getElementById('bottomSheet').className=`bottom-sheet ${sheetExpanded?'expanded':'collapsed'}`; }
-function expandSheet() { sheetExpanded=true; document.getElementById('bottomSheet').className='bottom-sheet expanded'; }
-function showLoading() { document.getElementById('loadingOverlay').classList.add('show'); }
-function hideLoading() { document.getElementById('loadingOverlay').classList.remove('show'); }
+function toggleSheet(){sheetExpanded=!sheetExpanded;document.getElementById('bottomSheet').className=`bottom-sheet ${sheetExpanded?'expanded':'collapsed'}`;}
+function expandSheet(){sheetExpanded=true;document.getElementById('bottomSheet').className='bottom-sheet expanded';}
+function showLoading(){document.getElementById('loadingOverlay').classList.add('show');}
+function hideLoading(){document.getElementById('loadingOverlay').classList.remove('show');}
 </script>
-<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyC8bb0ULcpoemQElpcSDgGhz-9s1RZFyqs&libraries=places&callback=initMap" async defer></script>
+<script>
+  (g=>{var h,a,k,p="The Google Maps JavaScript API",c="google",l="importLibrary",q="__ib__",m=document,b=window;b=b[c]||(b[c]={});var d=b.maps||(b.maps={}),r=new Set,e=new URLSearchParams,u=()=>h||(h=new Promise(async(f,n)=>{await (a=m.createElement("script"));e.set("libraries",[...r]+"");for(k in g)e.set(k.replace(/[A-Z]/g,t=>"_"+t[0].toLowerCase()),g[k]);e.set("callback",c+".maps."+q);a.src=`https://maps.${c}apis.com/maps/api/js?`+e;d[q]=f;a.onerror=()=>h=n(Error(p+" could not load."));a.nonce=m.querySelector("script[nonce]")?.nonce||"";m.head.append(a)}));d[l]?console.warn(p+" only loads once. Ignoring:",g):d[l]=(f,...n)=>r.add(f)&&u().then(()=>d[l](f,...n))})
+  ({key: "AIzaSyC8bb0ULcpoemQElpcSDgGhz-9s1RZFyqs", v: "weekly"});
+  initMap();
+</script>
 </body>
 </html>
