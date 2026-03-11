@@ -267,7 +267,7 @@ async function fetchPlaces() {
           fields: ['id','displayName','location','types','rating','userRatingCount','priceLevel','formattedAddress','regularOpeningHours','businessStatus','nationalPhoneNumber','websiteURI'],
           locationRestriction: {
             circle: {
-              center: {lat:userLat,lng:userLon},
+              center: {lat: userLat, lng: userLon},
               radius: radius
             }
           },
